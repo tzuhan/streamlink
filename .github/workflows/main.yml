@@ -17,10 +17,11 @@ jobs:
     name: Test
     strategy:
       fail-fast: false
-      # when changing the build matrix, the `after_n_builds` value in codecov.yml may need to be updated
+      # please remember to change the `codecov.notify.after_n_builds` value in .codecov.yml
+      # when changing the build matrix and changing the number of test runners
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: [2.7, 3.5, 3.6, 3.7, 3.8]
+        os: [ubuntu-20.04, windows-latest]
+        python: [3.6, 3.7, 3.8, 3.9]
 #       include:
 #         - python: X.Y-dev
 #           continue: true
@@ -28,18 +29,26 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v2
-      - uses: actions/setup-python@v1
+        with:
+          fetch-depth: 300
+      - uses: actions/setup-python@v2
         with:
           python-version: ${{ matrix.python }}
       - name: Install dependencies
         continue-on-error: ${{ matrix.continue || false }}
         run: bash ./script/install-dependencies.sh
+      - name: Lint (flake8)
+        continue-on-error: ${{ matrix.continue || false }}
+        run: flake8 --count
+      - name: Lint (line terminators)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: "! grep 'with CRLF line terminators' <(git ls-files | file -nNf-)"
+      - name: Lint (file permissions)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: "! grep -Ev '^644' <(git ls-files src/ tests/ | xargs stat '--format=%a %n')"
       - name: Test
         continue-on-error: ${{ matrix.continue || false }}
-        run: pytest -r a --cov --cov-report=xml
-      - name: Lint
-        continue-on-error: ${{ matrix.continue || false }}
-        run: flake8
+        run: pytest -r a --cov --cov-branch --cov-report=xml
       - name: Upload coverage data
         if: github.event_name != 'schedule'
         continue-on-error: ${{ matrix.continue || false }}
@@ -50,7 +59,7 @@ jobs:
   documentation:
     name: Test docs
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
         with:
@@ -59,7 +68,7 @@ jobs:
         run: git fetch --depth=300 origin +refs/tags/*:refs/tags/*
       - uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.9
       - name: Install dependencies
         run: |
           ./script/install-dependencies.sh
@@ -69,7 +78,7 @@ jobs:
 
   windows-installer:
     name: Windows installer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
         with:
@@ -78,11 +87,11 @@ jobs:
         run: git fetch --depth=300 origin +refs/tags/*:refs/tags/*
       - uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.9
       - name: Install dependencies
         run: |
           ./script/install-dependencies.sh
-          python -m pip install pynsist==2.4
+          python -m pip install pynsist
           sudo apt update
           sudo apt install -y nsis imagemagick inkscape
       - name: Installer file name
@@ -104,7 +113,7 @@ jobs:
       - test
       - documentation
       - windows-installer
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
         with:
@@ -113,7 +122,7 @@ jobs:
         run: git fetch --depth=300 origin +refs/tags/*:refs/tags/*
       - uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.9
       - name: Install dependencies
         run: |
           ./script/install-dependencies.sh
@@ -130,7 +139,7 @@ jobs:
     if: github.repository == 'streamlink/streamlink' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
       - deploy-documentation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
         with:
@@ -139,11 +148,14 @@ jobs:
         run: git fetch --depth=300 origin +refs/tags/*:refs/tags/*
       - uses: actions/setup-python@v1
         with:
-          python-version: 3.8
+          python-version: 3.9
       - name: Install dependencies
         run: |
           ./script/install-dependencies.sh
+          python -m pip install -r docs-requirements.txt
           python -m pip install --upgrade wheel twine
+      - name: Build man page
+        run: make --directory=docs man
       - name: Installer file name
         id: installer
         run: echo ::set-output name=filename::streamlink-$(python setup.py --version | sed 's/+/_/')

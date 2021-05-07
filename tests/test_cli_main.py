@@ -1,12 +1,22 @@
 import os.path
 import tempfile
+import unittest
+from unittest.mock import Mock, call, patch
 
 import streamlink_cli.main
-from streamlink_cli.main import resolve_stream_name, format_valid_streams, check_file_output, create_output
-from streamlink_cli.output import FileOutput, PlayerOutput
 from streamlink.plugin.plugin import Plugin
-import unittest
-from tests.mock import Mock, patch
+from streamlink.session import Streamlink
+from streamlink_cli.main import (
+    check_file_output,
+    create_output,
+    format_valid_streams,
+    handle_stream,
+    handle_url,
+    log_current_arguments,
+    log_current_versions,
+    resolve_stream_name
+)
+from streamlink_cli.output import FileOutput, PlayerOutput
 
 
 class FakePlugin:
@@ -130,6 +140,60 @@ class TestCLIMain(unittest.TestCase):
             ])
         )
 
+    @patch("streamlink_cli.main.args", stream_url=True, subprocess_cmdline=False)
+    @patch("streamlink_cli.main.console", json=True)
+    def test_handle_stream_with_json_and_stream_url(self, console, args):
+        stream = Mock()
+        streams = dict(best=stream)
+        plugin = Mock(FakePlugin(), module="fake", arguments=[], streams=Mock(return_value=streams))
+
+        handle_stream(plugin, streams, "best")
+        self.assertEqual(console.msg.mock_calls, [])
+        self.assertEqual(console.msg_json.mock_calls, [call(stream)])
+        self.assertEqual(console.error.mock_calls, [])
+        console.msg_json.mock_calls.clear()
+
+        console.json = False
+        handle_stream(plugin, streams, "best")
+        self.assertEqual(console.msg.mock_calls, [call("{0}", stream.to_url())])
+        self.assertEqual(console.msg_json.mock_calls, [])
+        self.assertEqual(console.error.mock_calls, [])
+        console.msg.mock_calls.clear()
+
+        stream.to_url.side_effect = TypeError()
+        handle_stream(plugin, streams, "best")
+        self.assertEqual(console.msg.mock_calls, [])
+        self.assertEqual(console.msg_json.mock_calls, [])
+        self.assertEqual(console.exit.mock_calls, [call("The stream specified cannot be translated to a URL")])
+
+    @patch("streamlink_cli.main.args", stream_url=True, stream=[], default_stream=[], retry_max=0, retry_streams=0)
+    @patch("streamlink_cli.main.console", json=True)
+    def test_handle_url_with_json_and_stream_url(self, console, args):
+        stream = Mock()
+        streams = dict(worst=Mock(), best=stream)
+        plugin = Mock(FakePlugin(), module="fake", arguments=[], streams=Mock(return_value=streams))
+
+        with patch("streamlink_cli.main.streamlink", resolve_url=Mock(return_value=plugin)):
+            handle_url()
+            self.assertEqual(console.msg.mock_calls, [])
+            self.assertEqual(console.msg_json.mock_calls, [call(dict(plugin="fake", streams=streams))])
+            self.assertEqual(console.error.mock_calls, [])
+            console.msg_json.mock_calls.clear()
+
+            console.json = False
+            handle_url()
+            self.assertEqual(console.msg.mock_calls, [call("{0}", stream.to_manifest_url())])
+            self.assertEqual(console.msg_json.mock_calls, [])
+            self.assertEqual(console.error.mock_calls, [])
+            console.msg.mock_calls.clear()
+
+            stream.to_manifest_url.side_effect = TypeError()
+            handle_url()
+            self.assertEqual(console.msg.mock_calls, [])
+            self.assertEqual(console.msg_json.mock_calls, [])
+            self.assertEqual(console.exit.mock_calls, [call("The stream specified cannot be translated to a URL")])
+            console.exit.mock_calls.clear()
+
     def test_create_output_no_file_output_options(self):
         streamlink_cli.main.console = Mock()
         streamlink_cli.main.args = args = Mock()
@@ -139,6 +203,7 @@ class TestCLIMain(unittest.TestCase):
         args.record_and_pipe = None
         args.title = None
         args.player = "mpv"
+        args.player_args = ""
         self.assertIsInstance(create_output(FakePlugin), PlayerOutput)
 
     def test_create_output_file_output(self):
@@ -182,6 +247,7 @@ class TestCLIMain(unittest.TestCase):
             args.record_and_pipe = None
             args.title = None
             args.player = "mpv"
+            args.player_args = ""
             args.player_fifo = None
             self.assertIsInstance(create_output(FakePlugin), PlayerOutput)
         finally:
@@ -196,3 +262,117 @@ class TestCLIMain(unittest.TestCase):
         args.record_and_pipe = True
         create_output(FakePlugin)
         console.exit.assert_called_with("Cannot use record options with other file output options.")
+
+
+@patch("streamlink_cli.main.log")
+@patch("streamlink_cli.main.CONFIG_FILES", ["/dev/null"])
+@patch("streamlink_cli.main.setup_plugins", Mock())
+@patch("streamlink_cli.main.setup_streamlink", Mock())
+@patch("streamlink.session.Streamlink.load_builtin_plugins", Mock())
+class TestCLIMainDebugLogging(unittest.TestCase):
+    def subject(self, argv):
+        session = Streamlink()
+        session.load_plugins(os.path.join(os.path.dirname(__file__), "plugin"))
+
+        with patch("streamlink_cli.main.streamlink", session), patch("sys.argv") as mock_argv:
+            mock_argv.__getitem__.side_effect = lambda x: argv[x]
+            try:
+                streamlink_cli.main.main()
+            except SystemExit:
+                pass
+
+    @patch("streamlink_cli.main.log_current_versions")
+    @patch("streamlink_cli.main.streamlink_version", "streamlink")
+    @patch("streamlink_cli.main.requests.__version__", "requests")
+    @patch("streamlink_cli.main.socks_version", "socks")
+    @patch("streamlink_cli.main.websocket_version", "websocket")
+    @patch("platform.python_version", Mock(return_value="python"))
+    def test_log_current_versions(self, mock_log_current_versions, mock_log):
+        def _log_current_versions():
+            log_current_versions()
+            raise SystemExit
+
+        mock_log_current_versions.side_effect = _log_current_versions
+
+        self.subject(["streamlink", "--loglevel", "info"])
+        self.assertEqual(mock_log.debug.mock_calls, [], "Doesn't log anything if not debug logging")
+
+        with patch("sys.platform", "linux"), \
+             patch("platform.platform", Mock(return_value="linux")):
+            self.subject(["streamlink", "--loglevel", "debug"])
+            self.assertEqual(
+                mock_log.debug.mock_calls,
+                [
+                    call("OS:         linux"),
+                    call("Python:     python"),
+                    call("Streamlink: streamlink"),
+                    call("Requests(requests), Socks(socks), Websocket(websocket)")
+                ]
+            )
+            mock_log.debug.mock_calls.clear()
+
+        with patch("sys.platform", "darwin"), \
+             patch("platform.mac_ver", Mock(return_value=["0.0.0"])):
+            self.subject(["streamlink", "--loglevel", "debug"])
+            self.assertEqual(
+                mock_log.debug.mock_calls,
+                [
+                    call("OS:         macOS 0.0.0"),
+                    call("Python:     python"),
+                    call("Streamlink: streamlink"),
+                    call("Requests(requests), Socks(socks), Websocket(websocket)")
+                ]
+            )
+            mock_log.debug.mock_calls.clear()
+
+        with patch("sys.platform", "win32"), \
+             patch("platform.system", Mock(return_value="Windows")), \
+             patch("platform.release", Mock(return_value="0.0.0")):
+            self.subject(["streamlink", "--loglevel", "debug"])
+            self.assertEqual(
+                mock_log.debug.mock_calls,
+                [
+                    call("OS:         Windows 0.0.0"),
+                    call("Python:     python"),
+                    call("Streamlink: streamlink"),
+                    call("Requests(requests), Socks(socks), Websocket(websocket)")
+                ]
+            )
+            mock_log.debug.mock_calls.clear()
+
+    @patch("streamlink_cli.main.log_current_arguments")
+    @patch("streamlink_cli.main.log_current_versions", Mock())
+    def test_log_current_arguments(self, mock_log_current_arguments, mock_log):
+        def _log_current_arguments(*args, **kwargs):
+            log_current_arguments(*args, **kwargs)
+            raise SystemExit
+
+        mock_log_current_arguments.side_effect = _log_current_arguments
+
+        self.subject([
+            "streamlink",
+            "--loglevel", "info"
+        ])
+        self.assertEqual(mock_log.debug.mock_calls, [], "Doesn't log anything if not debug logging")
+
+        self.subject([
+            "streamlink",
+            "--loglevel", "debug",
+            "-p", "custom",
+            "--testplugin-bool",
+            "--testplugin-password=secret",
+            "website.tld/channel",
+            "best,worst"
+        ])
+        self.assertEqual(
+            mock_log.debug.mock_calls,
+            [
+                call("Arguments:"),
+                call(" url=website.tld/channel"),
+                call(" stream=['best', 'worst']"),
+                call(" --loglevel=debug"),
+                call(" --player=custom"),
+                call(" --testplugin-bool=True"),
+                call(" --testplugin-password=********")
+            ]
+        )

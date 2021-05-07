@@ -1,7 +1,7 @@
 import logging
 import re
+from urllib.parse import urljoin
 
-from streamlink.compat import urljoin
 from streamlink.plugin import Plugin
 from streamlink.plugin.api import validate
 from streamlink.stream import HLSStream, HTTPStream
@@ -10,7 +10,7 @@ from streamlink.utils import parse_json, verifyjson
 log = logging.getLogger(__name__)
 
 
-class ard_live(Plugin):
+class ARDLive(Plugin):
     _url_re = re.compile(r"https?://((www|live)\.)?daserste\.de/")
     _player_re = re.compile(r'''data-ctrl-player\s*=\s*"(?P<jsondata>.*?)"''')
     _player_url_schema = validate.Schema(
@@ -56,7 +56,7 @@ class ard_live(Plugin):
             return
 
         data_url = urljoin(res.url, data_url)
-        log.debug("Player URL: '{0}'", data_url)
+        log.debug(f"Player URL: '{data_url}'")
         res = self.session.http.get(data_url)
         mediainfo = parse_json(res.text, name="MEDIAINFO", schema=self._mediainfo_schema)
         log.trace("Mediainfo: {0!r}".format(mediainfo))
@@ -70,13 +70,12 @@ class ard_live(Plugin):
                     stream_ = stream_[0]
 
                 if ".m3u8" in stream_:
-                    for s in HLSStream.parse_variant_playlist(self.session, stream_).items():
-                        yield s
-                elif (".mp4" in stream_ and ".f4m" not in stream_):
+                    yield from HLSStream.parse_variant_playlist(self.session, stream_).items()
+                elif ".mp4" in stream_ and ".f4m" not in stream_:
                     yield "{0}".format(self._QUALITY_MAP[stream["_quality"]]), HTTPStream(self.session, stream_)
                 else:
                     if ".f4m" not in stream_:
                         log.error("Unexpected stream type: '{0}'".format(stream_))
 
 
-__plugin__ = ard_live
+__plugin__ = ARDLive
